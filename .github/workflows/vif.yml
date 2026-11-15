@@ -1,0 +1,117 @@
+
+name: VIF VPN Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * 1 1"
+
+concurrency:
+  group: vif-vpn-update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pycryptodome
+
+      - name: Run VIF extractor
+        env:
+          VIF_DOWNLOAD_DIR: ${{ github.workspace }}/output
+        run: |
+          python vif_fetch.py
+
+      - name: Update GitHub Gist
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+          from pathlib import Path
+
+          token = os.environ["GIST_TOKEN"]
+          gist_id = os.environ["GIST_ID"]
+
+          out = Path("output/vif_out")
+
+          files_map = {
+              "vif_uris.txt": "uris.txt",
+              "vif_trojan.txt": "trojan_links.txt",
+              "vif_vless.txt": "vless_links.txt",
+              "vif_configs.json": "xray_configs.json",
+          }
+
+          files = {}
+
+          for gist_name, local_name in files_map.items():
+              path = out / local_name
+
+              if not path.is_file():
+                  print(f"[!] Missing: {path}")
+                  continue
+
+              content = path.read_text(encoding="utf-8")
+
+              if len(content.encode("utf-8")) > 950000:
+                  print(f"[!] Too large for Gist: {gist_name}")
+                  continue
+
+              files[gist_name] = {
+                  "content": content
+              }
+
+              print(f"[+] Prepared: {gist_name}")
+
+          if not files:
+              raise RuntimeError("No files available for Gist")
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          url = f"https://api.github.com/gists/{gist_id}"
+
+          response = requests.patch(
+              url,
+              headers=headers,
+              json={"files": files},
+              timeout=60
+          )
+
+          if response.status_code != 200:
+              raise RuntimeError(
+                  f"Gist update failed: "
+                  f"{response.status_code} "
+                  f"{response.text[:500]}"
+              )
+
+          result = response.json()
+
+          print("[+] GIST UPDATED")
+          print("[+] Gist URL:", result.get("html_url"))
+
+          for name, item in result.get("files", {}).items():
+              print(f"[+] {name}: {item.get('raw_url')}")
+
+          PY
